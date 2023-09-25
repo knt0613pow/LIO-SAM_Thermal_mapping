@@ -6,6 +6,7 @@ lio_sam:
   odomTopic: "odometry/imu"                   # IMU pre-preintegration odometry, same frequency as IMU
   gpsTopic: "odometry/gpsz"                   # GPS odometry topic from navsat, see module_navsat.launch file
 
+  thermalTopic: "/thermal/image_raw"
   # Frames
   lidarFrame: "base_link"
   baselinkFrame: "base_link"
@@ -52,6 +53,21 @@ lio_sam:
   extrinsicRPY: [1, 0, 0,
                   0, 1, 0,
                   0, 0, 1]
+
+
+
+
+  # Extrinsics: T_lI (image -> lidar)
+
+  extrinsicTrans_lI: [0.00627841349449320, -0.118251921501902, -0.00378260744564046]
+  extrinsicRot: [-0.00489950471577560, 0.0132426514288376, 0.999900308549145,
+                  -0.999987615139304, 0.000809362680099767, -0.00491065169393630,
+                  -0.000874312042231155, -0.999911984684245, 0.0132385219441765]
+  intrinsic: [448.480539164923, 0.000000, 314.532944548118,
+              0.000000, 449.040489151301, 250.444193529175,
+              0.000000, 0.000000, 1.000000]
+  distortion: [-0.417192456192362, 0.146900086948269, 0, 0, 0] # k1 k2 p1 p2 k3
+
 
   # LOAM feature threshold
   edgeThreshold: 1.0

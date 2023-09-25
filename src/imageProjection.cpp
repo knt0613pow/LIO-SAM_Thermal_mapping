@@ -41,6 +41,7 @@ private:
 
     std::mutex imuLock;
     std::mutex odoLock;
+    std::mutex thermalLock;
 
     ros::Subscriber subLaserCloud;
     ros::Publisher  pubLaserCloud;
@@ -67,6 +68,7 @@ private:
     Eigen::Affine3f transStartInverse;
 
     pcl::PointCloud<PointXYZIRT>::Ptr laserCloudIn;
+    pcl::PointCloud<PointXYZIRT>::Ptr laserCloudInRaw;
     pcl::PointCloud<OusterPointXYZIRT>::Ptr tmpOusterCloudIn;
     pcl::PointCloud<PointType>::Ptr   fullCloud;
     pcl::PointCloud<PointType>::Ptr   extractedCloud;
@@ -87,6 +89,11 @@ private:
     vector<int> columnIdnCountVec;
 
 
+    // For thermal
+    ros::Subscriber subThermalImage;  
+    std::deque<sensor_msgs::ImageConstPtr> ThemalImageQue;
+
+
 public:
     ImageProjection():
     deskewFlag(0)
@@ -95,6 +102,7 @@ public:
         subOdom       = nh.subscribe<nav_msgs::Odometry>(odomTopic+"_incremental", 2000, &ImageProjection::odometryHandler, this, ros::TransportHints().tcpNoDelay());
         subLaserCloud = nh.subscribe<sensor_msgs::PointCloud2>(pointCloudTopic, 5, &ImageProjection::cloudHandler, this, ros::TransportHints().tcpNoDelay());
 
+
         pubExtractedCloud = nh.advertise<sensor_msgs::PointCloud2> ("lio_sam/deskew/cloud_deskewed", 1);
         pubLaserCloudInfo = nh.advertise<lio_sam::cloud_info> ("lio_sam/deskew/cloud_info", 1);
 
@@ -102,11 +110,15 @@ public:
         resetParameters();
 
         pcl::console::setVerbosityLevel(pcl::console::L_ERROR);
+
+
+        subThermalImage = nh.subscribe<sensor_msgs::Image>(thermalTopic, 5, &ImageProjection::thermalHandler, this, ros::TransportHints().tcpNoDelay());
     }
 
     void allocateMemory()
     {
         laserCloudIn.reset(new pcl::PointCloud<PointXYZIRT>());
+        laserCloudInRaw.reset(new pcl::PointCloud<PointXYZIRT>());
         tmpOusterCloudIn.reset(new pcl::PointCloud<OusterPointXYZIRT>());
         fullCloud.reset(new pcl::PointCloud<PointType>());
         extractedCloud.reset(new pcl::PointCloud<PointType>());
@@ -125,6 +137,7 @@ public:
     void resetParameters()
     {
         laserCloudIn->clear();
+        laserCloudInRaw->clear();
         extractedCloud->clear();
         // reset range matrix for range image projection
         rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
@@ -146,6 +159,11 @@ public:
 
     ~ImageProjection(){}
 
+    void thermalHandler(const sensor_msgs::ImageConstPtr& thermalMsg ){
+        std::lock_guard<std::mutex> lock3(thermalLock);
+        ThemalImageQue.push_back(thermalMsg);
+    }
+    
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
         sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
@@ -179,15 +197,19 @@ public:
 
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
+        ROS_INFO("lidar callback");
         if (!cachePointCloud(laserCloudMsg))
             return;
 
         if (!deskewInfo())
             return;
 
+
+        updateThermal();
         projectPointCloud();
 
         cloudExtraction();
+        
 
         publishClouds();
 
@@ -206,18 +228,18 @@ public:
         cloudQueue.pop_front();
         if (sensor == SensorType::VELODYNE || sensor == SensorType::LIVOX)
         {
-            pcl::moveFromROSMsg(currentCloudMsg, *laserCloudIn);
+            pcl::moveFromROSMsg(currentCloudMsg, *laserCloudInRaw);
         }
         else if (sensor == SensorType::OUSTER)
         {
             // Convert to Velodyne format
             pcl::moveFromROSMsg(currentCloudMsg, *tmpOusterCloudIn);
-            laserCloudIn->points.resize(tmpOusterCloudIn->size());
-            laserCloudIn->is_dense = tmpOusterCloudIn->is_dense;
+            laserCloudInRaw->points.resize(tmpOusterCloudIn->size());
+            laserCloudInRaw->is_dense = tmpOusterCloudIn->is_dense;
             for (size_t i = 0; i < tmpOusterCloudIn->size(); i++)
             {
                 auto &src = tmpOusterCloudIn->points[i];
-                auto &dst = laserCloudIn->points[i];
+                auto &dst = laserCloudInRaw->points[i];
                 dst.x = src.x;
                 dst.y = src.y;
                 dst.z = src.z;
@@ -235,10 +257,10 @@ public:
         // get timestamp
         cloudHeader = currentCloudMsg.header;
         timeScanCur = cloudHeader.stamp.toSec();
-        timeScanEnd = timeScanCur + laserCloudIn->points.back().time;
+        timeScanEnd = timeScanCur + laserCloudInRaw->points.back().time;
 
         // check dense flag
-        if (laserCloudIn->is_dense == false)
+        if (laserCloudInRaw->is_dense == false)
         {
             ROS_ERROR("Point cloud is not in dense format, please remove NaN points first!");
             ros::shutdown();
@@ -603,6 +625,88 @@ public:
         cloudInfo.cloud_deskewed  = publishCloud(pubExtractedCloud, extractedCloud, cloudHeader.stamp, lidarFrame);
         pubLaserCloudInfo.publish(cloudInfo);
     }
+
+    void updateThermal()
+    {
+        laserCloudIn = laserCloudInRaw;
+        // while(!ThemalImageQue.empty()){
+        //     sensor_msgs::ImageConstPtr imageMsg = ThemalImageQue.front();
+        //     if(imageMsg->header.stamp.toSec()<timeScanCur -0.03)
+        //         ThemalImageQue.pop_front();
+        //     else 
+        //         break;
+        // }
+        // int cloudSize = laserCloudInRaw->points.size();
+        // laserCloudIn->points.resize(laserCloudInRaw->size());
+        // laserCloudIn->is_dense = laserCloudInRaw->is_dense;
+        // if (ThemalImageQue.empty()){
+        //     ROS_INFO("thermal que empty");
+        //     for (int i = 0; i < cloudSize; ++i)
+        //     {
+        //         PointXYZIRT thisPoint;
+        //         thisPoint.x = laserCloudInRaw->points[i].x;
+        //         thisPoint.y = laserCloudInRaw->points[i].y;
+        //         thisPoint.z = laserCloudInRaw->points[i].z;
+        //         thisPoint.intensity = 0;
+
+        //         thisPoint.ring = laserCloudInRaw->points[i].ring;
+        //         thisPoint.time = laserCloudInRaw->points[i].time;
+
+        //         laserCloudIn->points[i] = thisPoint;
+        //     }
+        // }
+        // else{
+        //     ROS_INFO("thermal que valid");
+        //     sensor_msgs::ImageConstPtr& imageMsg = ThemalImageQue.front();
+        //     ThemalImageQue.pop_front();
+        //     ROS_INFO("time diff , %lf", imageMsg->header.stamp.toSec() - timeScanCur);
+        //     cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(imageMsg, sensor_msgs::image_encodings::MONO8);
+        //     cv::Mat latestImage = cv_ptr->image;
+        //     cv::Mat vis = latestImage.clone();
+        //     cv::cvtColor(vis, vis, CV_GRAY2BGR);
+        //     for (int i = 0; i < cloudSize; ++i)
+        //     {
+        //         PointXYZIRT thisPoint;
+        //         thisPoint.x = laserCloudInRaw->points[i].x;
+        //         thisPoint.y = laserCloudInRaw->points[i].y;
+        //         thisPoint.z = laserCloudInRaw->points[i].z;
+
+        //         if (thisPoint.x > 0.01){
+        //             cv::Point3d point3D(thisPoint.x , thisPoint.y, thisPoint.z);
+        //             std::vector<cv::Point3d> Point3dVector ;
+        //             Point3dVector.push_back(point3D);
+        //             std::vector<cv::Point2d> projectedPoints;
+
+
+        //             cv::projectPoints(Point3dVector, rvec_Il, tvec_Il, intrinsic, distortion, projectedPoints);
+        
+        //             double u = projectedPoints[0].x;
+        //             double v = projectedPoints[0].y;
+        //             if (u >= 0 && u < latestImage.cols && v >= 0 && v < latestImage.rows) {
+        //                 uchar pixelValue = latestImage.at<uchar>(v, u);// Access the pixel at (v, u)
+        //                 thisPoint.intensity = static_cast<float>(pixelValue);
+        //                 cv::circle(vis, cv::Point(u, v), 1, cv::Scalar(0, 0, 255));
+        //             } 
+        //             else {
+        //                 thisPoint.intensity = 0;
+        //             }
+        //         }
+
+        //         else {
+        //             thisPoint.intensity = 0;
+        //         }
+        //         thisPoint.ring = laserCloudInRaw->points[i].ring;
+        //         thisPoint.time = laserCloudInRaw->points[i].time;
+
+        //         laserCloudIn->points[i] = thisPoint;
+
+        //     }
+        //     cv::imshow("vis", vis);
+        //     cv::waitKey(1);
+        // }
+    }
+
+    
 };
 
 int main(int argc, char** argv)

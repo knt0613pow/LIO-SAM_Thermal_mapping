@@ -55,6 +55,14 @@
 #include <thread>
 #include <mutex>
 
+
+
+// For thermal image
+#include <sensor_msgs/Image.h>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/opencv.hpp>
+
+
 using namespace std;
 
 typedef pcl::PointXYZI PointType;
@@ -74,6 +82,7 @@ public:
     string imuTopic;
     string odomTopic;
     string gpsTopic;
+    string thermalTopic;
 
     //Frames
     string lidarFrame;
@@ -113,6 +122,20 @@ public:
     Eigen::Matrix3d extRPY;
     Eigen::Vector3d extTrans;
     Eigen::Quaterniond extQRPY;
+    
+
+    // Thermal
+    vector<double> extRotV_lI;
+    vector<double> extTransV_lI;
+    vector<double> intrinsicV;
+    vector<double> distortionV;
+    cv::Mat extRot_lI;
+    cv::Mat extTrans_lI;
+    cv::Mat rvec_Il;
+    cv::Mat tvec_Il;
+    cv::Mat intrinsic;
+    cv::Mat distortion;
+
 
     // LOAM
     float edgeThreshold;
@@ -160,6 +183,8 @@ public:
         nh.param<std::string>("lio_sam/imuTopic", imuTopic, "imu_correct");
         nh.param<std::string>("lio_sam/odomTopic", odomTopic, "odometry/imu");
         nh.param<std::string>("lio_sam/gpsTopic", gpsTopic, "odometry/gps");
+
+        nh.param<std::string>("lio_sam/thermalTopic", thermalTopic, "thermal/image_raw");
 
         nh.param<std::string>("lio_sam/lidarFrame", lidarFrame, "base_link");
         nh.param<std::string>("lio_sam/baselinkFrame", baselinkFrame, "base_link");
@@ -214,6 +239,38 @@ public:
         extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
         extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
         extQRPY = Eigen::Quaterniond(extRPY).inverse();
+
+
+        nh.param<vector<double>>("lio_sam/extrinsicRot", extRotV_lI , vector<double>());
+        nh.param<vector<double>>("lio_sam/extrinsicTrans_lI", extTransV_lI , vector<double>());
+        nh.param<vector<double>>("lio_sam/intrinsic", intrinsicV , vector<double>());
+        nh.param<vector<double>>("lio_sam/distortion", distortionV , vector<double>());
+
+        extRot_lI = cv::Mat (3, 3, CV_64F);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                extRot_lI.at<double>(i, j) = extRotV_lI[i * 3 + j];
+            }
+        }    
+        cv::Rodrigues(extRot_lI.inv(), rvec_Il);    
+        
+        extTrans_lI = cv::Mat (3, 1, CV_64F);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                extTrans_lI.at<double>(i, j) = extTransV_lI[i * 3 + j];
+            }
+        }        
+        tvec_Il = - extRot_lI.inv() * extTrans_lI;
+        intrinsic  = cv::Mat (3, 3, CV_64F);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                intrinsic.at<double>(i, j) = intrinsicV[i * 3 + j];
+            }
+        }
+        distortion = cv::Mat ( distortionV.size(),1, CV_64F);
+        for (size_t i = 0; i < distortionV.size(); ++i) {
+            distortion.at<double>( i) = distortionV[i];
+        }
 
         nh.param<float>("lio_sam/edgeThreshold", edgeThreshold, 0.1);
         nh.param<float>("lio_sam/surfThreshold", surfThreshold, 0.1);
